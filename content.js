@@ -79,6 +79,15 @@
     return false;
   }
 
+  // MathJax 渲染后的公式容器（span.MathJax / mjx-container / MathJax_Preview 等）：
+  // 这些是公式的「可视化输出 + 预览」，真正的源在 <script type="math/tex"> 里。
+  function isMathJaxVisual(el) {
+    if (el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (el.tagName.toLowerCase() === 'script') return false;
+    const cls = el.getAttribute('class') || '';
+    return /MathJax|mjx-|MJX_/.test(cls) || el.getAttribute('role') === 'math';
+  }
+
   // ---------- 序列化（HTML -> 带占位符的 Markdown 文本） ----------
   function tokenizeText(text, mathTokens) {
     let out = '';
@@ -117,6 +126,19 @@
       return '';
     }
     if (tag === 'style') return '';
+
+    // MathJax 已渲染的公式：只保留 <script type="math/tex"> 源，跳过可视化输出与预览，
+    // 否则同一个公式会被重复序列化多次（脚本源 + 预览 + 渲染结果各算一份）。
+    if (isMathJaxVisual(node)) {
+      let out = '';
+      for (const s of node.querySelectorAll('script[type*="math/tex"]')) {
+        const st = s.getAttribute('type') || '';
+        const id = mathTokens.length;
+        mathTokens.push({ id, tex: stripInvisibleChars(s.textContent), display: st.indexOf('display') !== -1 });
+        out += `[[CF_MATH_${id}]]`;
+      }
+      return out;
+    }
 
     // 隐藏元素及其子树整体跳过（force=true 时强制纳入，用于折叠块这类默认隐藏但属于正常内容的情况）
     if (!force && isHidden(node)) return '';
