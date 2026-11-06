@@ -1,5 +1,6 @@
 // Codeforces Tool — 内容脚本
-// 题面、Input 说明、Output 说明、Note 四部分各自提供独立的「翻译」按钮，
+// 题面、Input 说明、Output 说明、Note 四部分各自提供独立的「翻译」按钮；
+// 博客（题解）页则为每个折叠块（.spoiler / <details>）提供独立的「翻译」按钮。
 // 译文插入在对应部分的正下方，互不影响。
 // 关键点：
 // 1. Codeforces 的公式分隔符是 $$$...$$$（行内）与 $$$$...$$$$（块级），
@@ -97,7 +98,7 @@
     return out;
   }
 
-  function serializeNode(node, mathTokens, codeTokens) {
+  function serializeNode(node, mathTokens, codeTokens, force) {
     if (node.nodeType === Node.TEXT_NODE) {
       return tokenizeText(stripInvisibleChars(node.nodeValue), mathTokens);
     }
@@ -117,8 +118,8 @@
     }
     if (tag === 'style') return '';
 
-    // 隐藏元素及其子树整体跳过
-    if (isHidden(node)) return '';
+    // 隐藏元素及其子树整体跳过（force=true 时强制纳入，用于折叠块这类默认隐藏但属于正常内容的情况）
+    if (!force && isHidden(node)) return '';
 
     // 代码块：用围栏代码块包裹占位符，交给 marked 渲染为 <pre><code>
     if (tag === 'pre') {
@@ -133,7 +134,7 @@
     }
 
     let inner = '';
-    for (const c of Array.from(node.childNodes)) inner += serializeNode(c, mathTokens, codeTokens);
+    for (const c of Array.from(node.childNodes)) inner += serializeNode(c, mathTokens, codeTokens, force);
     if (/^(P|DIV|SECTION|CENTER|UL|OL|LI|TABLE|TR|H[1-6]|BLOCKQUOTE|ARTICLE|HEADER)$/i.test(tag)) {
       return `\n${inner}\n`;
     }
@@ -145,11 +146,11 @@
   }
 
   // 对「活 DOM 元素」直接序列化（这样能用 getComputedStyle 判断可见性）
-  function extractFromElements(elements) {
+  function extractFromElements(elements, force) {
     const mathTokens = [];
     const codeTokens = [];
     let md = '';
-    for (const el of elements) md += serializeNode(el, mathTokens, codeTokens);
+    for (const el of elements) md += serializeNode(el, mathTokens, codeTokens, force);
     return { markdown: collapse(md), mathTokens, codeTokens };
   }
 
@@ -320,9 +321,19 @@
     const prev = btn.textContent;
     btn.textContent = '翻译中…';
     try {
-      if (!sec.markdown) throw new Error('该部分没有可翻译的内容。');
-      const translated = await requestTranslation(sec.markdown, sec.kind);
-      const html = renderMarkdown(translated, sec.mathTokens, sec.codeTokens);
+      // 惰性获取内容：博客折叠块在点击时才序列化（其内容可能是懒加载的，
+      // 启动时只有「加载中」占位符）
+      let markdown, mathTokens, codeTokens;
+      if (typeof sec.extract === 'function') {
+        const e = await sec.extract();
+        markdown = e.markdown; mathTokens = e.mathTokens; codeTokens = e.codeTokens;
+      } else {
+        markdown = sec.markdown; mathTokens = sec.mathTokens; codeTokens = sec.codeTokens;
+      }
+      if (!markdown) throw new Error('该部分没有可翻译的内容。');
+      if (looksLoading(markdown)) throw new Error('该部分内容仍在加载中，请先点开折叠块，稍后再点「翻译」。');
+      const translated = await requestTranslation(markdown, sec.kind);
+      const html = renderMarkdown(translated, mathTokens, codeTokens);
 
       let box = boxes[sec.id];
       if (!box) {
@@ -335,7 +346,7 @@
       box.style.display = '';
       btn.textContent = '收起';
 
-      boxData[sec.id] = { markdown: translated, mathTokens: sec.mathTokens, codeTokens: sec.codeTokens };
+      boxData[sec.id] = { markdown: translated, mathTokens, codeTokens };
       wireRetranslate(box, sec, btn, boxes, boxData);
       await cacheSet(currentCacheKey(), sec.id, { ...boxData[sec.id], open: true });
     } catch (e) {
@@ -431,10 +442,123 @@
     return null;
   }
 
+  // 折叠块标题（用于按钮提示与译文框标题）
+  function blockTitle(el) {
+    const t = el.querySelector('.spoiler-title, summary');
+    if (t) {
+      const txt = stripInvisibleChars(t.textContent).trim().replace(/\s+/g, ' ');
+      if (txt) return txt.slice(0, 40);
+    }
+    return '折叠块';
+  }
+
+  // 收集博客正文里的「折叠块」：CF 的 .spoiler 与原生 <details>。
+  // 只取顶层块（不把嵌套在另一个折叠块里的内容重复算作一个翻译单元）。
+  function collectBlogBlocks(body) {
+    const blocks = [];
+    for (const el of body.querySelectorAll('.spoiler')) {
+      if (el.parentElement && el.parentElement.closest('.spoiler')) continue; // 嵌套 spoiler 跳过
+      blocks.push({ el, title: blockTitle(el) });
+    }
+    for (const el of body.querySelectorAll('details')) {
+      if (el.parentElement && (el.parentElement.closest('details') || el.parentElement.closest('.spoiler'))) continue;
+      blocks.push({ el, title: blockTitle(el) });
+    }
+    blocks.sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
+    return blocks;
+  }
+
+  // 折叠块的正文来源：CF spoiler 取 .spoiler-content；<details> 取除 <summary> 外的子节点
+  function blockSources(blk) {
+    const sc = blk.el.querySelector('.spoiler-content');
+    if (sc) return [sc];
+    return Array.from(blk.el.children).filter((c) => c.tagName.toLowerCase() !== 'summary');
+  }
+
+  const LOADING_RE = /(tutorial\s+is\s+loading|loading|正在加载|加载中?|\.\.\.)/i;
+
+  // 判断折叠块内容是否仍是「加载中」占位符（真实题解较长，占位符很短）
+  function looksLoading(md) {
+    if (!md) return true;
+    const s = stripInvisibleChars(md).replace(/\s+/g, ' ').trim();
+    return s.length < 120 && LOADING_RE.test(s);
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  function prependTitle(blk, md) {
+    return (blk.title && blk.title !== '折叠块' ? '## ' + blk.title + '\n\n' : '') + md;
+  }
+
+  // 点击翻译时才实时抓取折叠块内容：若内容仍是「加载中」占位符，
+  // 则尝试点开折叠块触发 CF 的懒加载，并轮询等待真实内容就绪。
+  async function extractBlockContent(blk) {
+    const extract = () => extractFromElements(blockSources(blk), true);
+    let e = extract();
+    if (!looksLoading(e.markdown)) {
+      return { markdown: prependTitle(blk, e.markdown), mathTokens: e.mathTokens, codeTokens: e.codeTokens };
+    }
+
+    const title = blk.el.querySelector('.spoiler-title');
+    if (title) { try { title.click(); } catch (_) {} }
+
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      await sleep(200);
+      e = extract();
+      if (e.markdown && !looksLoading(e.markdown)) {
+        return { markdown: prependTitle(blk, e.markdown), mathTokens: e.mathTokens, codeTokens: e.codeTokens };
+      }
+    }
+    return { markdown: prependTitle(blk, e.markdown), mathTokens: e.mathTokens, codeTokens: e.codeTokens };
+  }
+
   function setupBlog() {
     if (!isBlogEntryPage()) return;
     const body = findBlogBodyEl();
     if (!body) return;
+
+    const blocks = collectBlogBlocks(body);
+    if (!blocks.length) {
+      setupBlogFullText(body); // 没有折叠块时退回「全文翻译」
+      return;
+    }
+
+    const boxes = {};
+    const boxData = {};
+    const btns = {};
+    const secs = {};
+
+    blocks.forEach((blk, i) => {
+      const sec = {
+        id: 'blog-' + i,
+        title: blk.title,
+        kind: 'blog',
+        anchor: blk.el,
+        // 惰性提取：点击时才序列化，避免在启动时拿到懒加载的「加载中」占位符
+        extract: () => extractBlockContent(blk)
+      };
+      secs[sec.id] = sec;
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'cft-btn';
+      btn.textContent = '翻译';
+      btn.title = '翻译：' + sec.title;
+      btn.addEventListener('click', () => onToggle(sec, btn, boxes, boxData));
+      blk.el.insertAdjacentElement('beforebegin', btn);
+      btns[sec.id] = btn;
+    });
+
+    if (Object.keys(secs).length) {
+      PAGE_STATES.push({ secs, boxes, boxData, btns });
+    }
+  }
+
+  // 博客没有折叠块时的兜底：整篇翻译（原行为）
+  function setupBlogFullText(body) {
     const e = extractFromElements([body]);
     const sec = {
       id: 'blog',
