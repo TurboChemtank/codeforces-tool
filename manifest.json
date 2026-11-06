@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Codeforces Tool",
+  "version": "1.0.0",
+  "description": "使用 DeepSeek API 将 Codeforces 题面与博客文章翻译为简体中文，数学公式用 KaTeX 渲染。",
+  "permissions": ["storage"],
+  "host_permissions": ["https://api.deepseek.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://codeforces.com/*", "*://*.codeforces.com/*"],
+      "js": ["lib/marked.min.js", "lib/katex.min.js", "content.js"],
+      "css": ["lib/katex.min.css", "content.css"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/fonts/*"],
+      "matches": ["*://codeforces.com/*", "*://*.codeforces.com/*"]
+    }
+  ],
+  "action": {
+    "default_title": "Codeforces Tool"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}
